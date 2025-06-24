@@ -1,25 +1,28 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from EGNet.modules.ops import point_to_node_partition, index_select
-from EGNet.modules.registration import get_node_correspondences
-from EGNet.modules.sinkhorn import LearnableLogOptimalTransport
-from EGNet.modules.EGNet import (
-    Transformer,
+from IPython import embed
+import time
+from geotransformer.modules.ops import point_to_node_partition, index_select
+from geotransformer.modules.registration import get_node_correspondences
+from geotransformer.modules.sinkhorn import LearnableLogOptimalTransport
+from geotransformer.modules.geotransformer import (
+    GeometricTransformer,
     SuperPointMatching,
     SuperPointTargetGenerator,
-    DensePointMatching
+    LocalGlobalRegistration,
 )
 
-from backbone import EGbackbone
+from backbone import KPConvFPN
 
-class EGNet(nn.Module):
+
+class GeoTransformer(nn.Module):
     def __init__(self, cfg):
-        super(EGNet, self).__init__()
+        super(GeoTransformer, self).__init__()
         self.num_points_in_patch = cfg.model.num_points_in_patch
         self.matching_radius = cfg.model.ground_truth_matching_radius
 
-        self.backbone = EGbackbone(
+        self.backbone = KPConvFPN(
             cfg.backbone.input_dim,
             cfg.backbone.output_dim,
             cfg.backbone.init_dim,
@@ -29,16 +32,16 @@ class EGNet(nn.Module):
             cfg.backbone.group_norm,
         )
 
-        self.transformer = Transformer(
-            cfg.EGNet.input_dim,
-            cfg.EGNet.output_dim,
-            cfg.EGNet.hidden_dim,
-            cfg.EGNet.num_heads,
-            cfg.EGNet.blocks,
-            cfg.EGNet.sigma_d,
-            cfg.EGNet.sigma_a,
-            cfg.EGNet.angle_k,
-            reduction_a=cfg.EGNet.reduction_a,
+        self.transformer = GeometricTransformer(
+            cfg.geotransformer.input_dim,
+            cfg.geotransformer.output_dim,
+            cfg.geotransformer.hidden_dim,
+            cfg.geotransformer.num_heads,
+            cfg.geotransformer.blocks,
+            cfg.geotransformer.sigma_d,
+            cfg.geotransformer.sigma_a,
+            cfg.geotransformer.angle_k,
+            reduction_a=cfg.geotransformer.reduction_a,
         )
 
         self.coarse_target = SuperPointTargetGenerator(
@@ -49,7 +52,7 @@ class EGNet(nn.Module):
             cfg.coarse_matching.num_correspondences, cfg.coarse_matching.dual_normalization
         )
 
-        self.fine_matching = DensePointMatching(
+        self.fine_matching = LocalGlobalRegistration(
             cfg.fine_matching.topk,
             cfg.fine_matching.acceptance_radius,
             mutual=cfg.fine_matching.mutual,
@@ -91,6 +94,8 @@ class EGNet(nn.Module):
         output_dict['ref_points'] = ref_points
         output_dict['src_points'] = src_points
 
+        # 1. Generate ground truth node correspondences
+        # since = time.time()
         _, ref_node_masks, ref_node_knn_indices, ref_node_knn_masks = point_to_node_partition(
             ref_points_f, ref_points_c, self.num_points_in_patch
         )
@@ -115,15 +120,25 @@ class EGNet(nn.Module):
             ref_knn_masks=ref_node_knn_masks,
             src_knn_masks=src_node_knn_masks,
         )
+
         output_dict['gt_node_corr_indices'] = gt_node_corr_indices
         output_dict['gt_node_corr_overlaps'] = gt_node_corr_overlaps
 
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 2. KPFCNN Encoder
+
+        # since = time.time()
         feats_list = self.backbone(feats, data_dict)
         feats_c = feats_list[-1]
         feats_f = feats_list[0]
-
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 3. Conditional Transformer
+        # since = time.time()
         ref_feats_c = feats_c[:ref_length_c]
         src_feats_c = feats_c[ref_length_c:]
+
 
         ref_feats_c, src_feats_c = self.transformer(
             ref_points_c.unsqueeze(0),
@@ -137,45 +152,65 @@ class EGNet(nn.Module):
         output_dict['ref_feats_c'] = ref_feats_c_norm
         output_dict['src_feats_c'] = src_feats_c_norm
 
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 5. Head for fine level matching
+        # since = time.time()
         ref_feats_f = feats_f[:ref_length_f]
         src_feats_f = feats_f[ref_length_f:]
         output_dict['ref_feats_f'] = ref_feats_f
         output_dict['src_feats_f'] = src_feats_f
-
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 6. Select topk nearest node correspondences
+        # since = time.time()
         with torch.no_grad():
             ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_matching(
                 ref_feats_c_norm, src_feats_c_norm, ref_node_masks, src_node_masks
             )
+
             output_dict['ref_node_corr_indices'] = ref_node_corr_indices
             output_dict['src_node_corr_indices'] = src_node_corr_indices
 
+            # 7 Random select ground truth node correspondences during training
             if self.training:
                 ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_target(
                     gt_node_corr_indices, gt_node_corr_overlaps
                 )
-
-        ref_node_corr_knn_indices = ref_node_knn_indices[ref_node_corr_indices]  
-        src_node_corr_knn_indices = src_node_knn_indices[src_node_corr_indices]  
-        ref_node_corr_knn_masks = ref_node_knn_masks[ref_node_corr_indices]  
-        src_node_corr_knn_masks = src_node_knn_masks[src_node_corr_indices]  
-        ref_node_corr_knn_points = ref_node_knn_points[ref_node_corr_indices] 
-        src_node_corr_knn_points = src_node_knn_points[src_node_corr_indices] 
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 7.2 Generate batched node points & feats
+        # since = time.time()
+        ref_node_corr_knn_indices = ref_node_knn_indices[ref_node_corr_indices]  # (P, K)
+        src_node_corr_knn_indices = src_node_knn_indices[src_node_corr_indices]  # (P, K)
+        ref_node_corr_knn_masks = ref_node_knn_masks[ref_node_corr_indices]  # (P, K)
+        src_node_corr_knn_masks = src_node_knn_masks[src_node_corr_indices]  # (P, K)
+        ref_node_corr_knn_points = ref_node_knn_points[ref_node_corr_indices]  # (P, K, 3)
+        src_node_corr_knn_points = src_node_knn_points[src_node_corr_indices]  # (P, K, 3)
 
         ref_padded_feats_f = torch.cat([ref_feats_f, torch.zeros_like(ref_feats_f[:1])], dim=0)
         src_padded_feats_f = torch.cat([src_feats_f, torch.zeros_like(src_feats_f[:1])], dim=0)
-        ref_node_corr_knn_feats = index_select(ref_padded_feats_f, ref_node_corr_knn_indices, dim=0) 
-        src_node_corr_knn_feats = index_select(src_padded_feats_f, src_node_corr_knn_indices, dim=0) 
+        ref_node_corr_knn_feats = index_select(ref_padded_feats_f, ref_node_corr_knn_indices, dim=0)  # (P, K, C)
+        src_node_corr_knn_feats = index_select(src_padded_feats_f, src_node_corr_knn_indices, dim=0)  # (P, K, C)
 
         output_dict['ref_node_corr_knn_points'] = ref_node_corr_knn_points
         output_dict['src_node_corr_knn_points'] = src_node_corr_knn_points
         output_dict['ref_node_corr_knn_masks'] = ref_node_corr_knn_masks
         output_dict['src_node_corr_knn_masks'] = src_node_corr_knn_masks
 
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
+        # 8. Optimal transport
+
         matching_scores = torch.einsum('bnd,bmd->bnm', ref_node_corr_knn_feats, src_node_corr_knn_feats)  # (P, K, K)
         matching_scores = matching_scores / feats_f.shape[1] ** 0.5
+        # since = time.time()
         matching_scores = self.optimal_transport(matching_scores, ref_node_corr_knn_masks, src_node_corr_knn_masks)
+        # time_elapsed = time.time() - since
+        # print(time_elapsed)
         output_dict['matching_scores'] = matching_scores
 
+        # 9. Generate final correspondences during testing
         with torch.no_grad():
             if not self.fine_matching.use_dustbin:
                 matching_scores = matching_scores[:, :-1, :-1]
@@ -188,6 +223,7 @@ class EGNet(nn.Module):
                 matching_scores,
                 node_corr_scores,
             )
+
             output_dict['ref_corr_points'] = ref_corr_points
             output_dict['src_corr_points'] = src_corr_points
             output_dict['corr_scores'] = corr_scores
@@ -197,5 +233,18 @@ class EGNet(nn.Module):
 
 
 def create_model(config):
-    model = EGNet(config)
+    model = GeoTransformer(config)
     return model
+
+
+def main():
+    from config import make_cfg
+
+    cfg = make_cfg()
+    model = create_model(cfg)
+    print(model.state_dict().keys())
+    print(model)
+
+
+if __name__ == '__main__':
+    main()
