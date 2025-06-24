@@ -54,7 +54,7 @@ def main(num,epoch):
     src_points = np.load('../../data/demo/DePoLL-prem/video_reconstructionBeforeRigid_scaled100_spa0015_'+num+'.npy')
     ref_points = np.load('../../data/demo/DePoLL-prem/surface_CT_scaled100_spa0015_'+num+'.npy')
 
-    state_dict = torch.load('../../output/geotransformer.3dmatch.stage4.gse.k3.max.oacl.stage2.sinkhorn/snapshots/epoch-10-lightweight-TRE4.44-RRE4.27.pth.tar')
+    state_dict = torch.load('../../output/geotransformer.3dmatch.stage4.gse.k3.max.oacl.stage2.sinkhorn/snapshots/weight-TRE4.44-RRE4.27.pth.tar')
    
 
     src_feats = np.ones_like(src_points[:, :1])
