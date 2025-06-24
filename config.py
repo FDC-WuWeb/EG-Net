@@ -1,10 +1,10 @@
-import os
+Netimport os
 import os.path as osp
 import argparse
 
 from easydict import EasyDict as edict
 
-from geotransformer.utils.common import ensure_dir
+from EGNet.utils.common import ensure_dir
 
 
 _C = edict()
