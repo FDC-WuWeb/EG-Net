@@ -13,7 +13,7 @@ The processed public dataset, DePoLL, has been uploaded to the Release section.
 <div align="center">
   <img src="/fig2.svg">
 </div>
-
+Coming soon!
 ## Acknowledgements
 [GeoTransformer](https://github.com/qinzheng93/GeoTransformer)
-Coming soon!
+
